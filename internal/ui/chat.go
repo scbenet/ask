@@ -17,30 +17,27 @@ type LLMReplyMsg struct {
 	Content string
 }
 
-type SendPromptMsg struct{ Prompt string } // Message from Chat view
+// Message to send to API
+type SendPromptMsg struct{ Prompt string }
 
 // Chat is the main chat view (history + input field).
-// It can be plugged directly into a root Bubble Tea program
-// or nested inside a parent model.
 type Chat struct {
 	history viewport.Model
 	input   textarea.Model
 
-	sending    bool // while waiting for the model
+	sending    bool // true while waiting for the model response
 	historyBuf strings.Builder
 
 	sendKey key.Binding
 
-	// style handles; tweak to taste
+	// style handles
 	userStyle      lipgloss.Style
 	assistantStyle lipgloss.Style
 	borderStyle    lipgloss.Style
 }
 
-// Add a method to update sending state from App
 func (c *Chat) SetSending(sending bool) {
 	c.sending = sending
-	// Maybe change placeholder or style while sending?
 	if sending {
 		c.input.Placeholder = "Assistant is thinking..."
 	} else {
@@ -48,7 +45,7 @@ func (c *Chat) SetSending(sending bool) {
 	}
 }
 
-// New returns an initialized Chat with sane defaults.
+// returns an initialized Chat with sane defaults.
 func New(width, height int) *Chat {
 	// textarea (user input)
 	ti := textarea.New()
@@ -57,14 +54,15 @@ func New(width, height int) *Chat {
 	ti.CharLimit = 0
 	ti.ShowLineNumbers = false
 
-	// remap keys: Shift+Enter (and Ctrl+J as a fallback) inserts newline
+	// remap keys: shift+Enter (and Ctrl+J as a fallback) inserts newline
+	// TODO shift+enter doesn't work yet, need to update to new bubbletea version to get kitty protocol support
 	ti.KeyMap.InsertNewline = key.NewBinding(
 		key.WithKeys("shift+enter", "ctrl+j"),
 		key.WithHelp("⇧+Enter", "newline"),
 	)
 
 	// viewport (scrollable chat history)
-	vp := viewport.New(width, 0) // leave 5 rows for input & border
+	vp := viewport.New(width, 0)
 	vp.KeyMap = viewport.DefaultKeyMap()
 	vp.SetContent("")
 
@@ -92,37 +90,32 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch m := msg.(type) {
 	case tea.KeyMsg:
-		// log.Printf("Chat.Update received: %T", msg)
 		switch {
 		case key.Matches(m, c.sendKey) && !c.sending: // send prompt
 			log.Println("Chat.Update: Send key matched")
 			prompt := strings.TrimSpace(c.input.Value())
-			// log.Printf("Chat.Update: Input value is: '%s'", c.input.Value())
-			// log.Printf("Chat.Update: Trimmed prompt is: '%s'", prompt)
+
 			if prompt == "" {
-				// log.Println("Chat.Update: Prompt is empty, breaking")
+				log.Println("Chat.Update: Prompt is empty, breaking")
 				break
 			}
+
 			// append user message to history
 			availableWidth := c.history.Width
-			userLabel := c.userStyle.Render("You") // Style the "You" label
+			userLabel := c.userStyle.Render("You")
 			fullMessageLine := fmt.Sprintf("%s: %s", userLabel, prompt)
 			rightAlignedStyle := lipgloss.NewStyle().
 				Width(availableWidth). // IMPORTANT: Set width for alignment context
-				Align(lipgloss.Right)  // Align content to the right
+				Align(lipgloss.Right)  // align content to the right
 			alignedUserMessage := rightAlignedStyle.Render(fullMessageLine)
 			fmt.Fprintf(&c.historyBuf, "%s\n\n", alignedUserMessage)
-			// debug: use plain formatting
-			// fmt.Fprintf(&c.historyBuf, "You: %s\n\n", prompt)
-			// log.Printf("Chat.Update: History buffer length: %d", c.historyBuf.Len())
+
 			c.history.SetContent(c.historyBuf.String())
 			c.history.GotoBottom()
-			// log.Println("Chat.Update: History SetContent & GotoBottom called")
 			c.input.Reset()
 
-			// *** CHANGE HERE: Return SendPromptMsg command ***
 			cmd = func() tea.Msg {
-				return SendPromptMsg{Prompt: prompt} // Assuming SendPromptMsg is in ui package for now
+				return SendPromptMsg{Prompt: prompt}
 			}
 			cmds = append(cmds, cmd)
 
@@ -131,23 +124,20 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			c.input, cmd = c.input.Update(msg)
 			cmds = append(cmds, cmd)
 
-			// Handle viewport scrolling AFTER textarea if preferred
 			c.history, cmd = c.history.Update(msg)
 			cmds = append(cmds, cmd)
 		}
 
 	case LLMReplyMsg:
-		// log.Printf("Chat.Update: LLMReplyMsg received: '%s'", m.Content)
+		log.Printf("Chat.Update: LLMReplyMsg received: '%s'", m.Content)
 		// append assistant message
 		fmt.Fprintf(&c.historyBuf, "%s: %s\n\n", c.assistantStyle.Render("Assistant"), m.Content)
-		// debug: use plain formatting
-		// fmt.Fprintf(&c.historyBuf, "Assistant: %s\n\n", m.Content)
+
 		c.history.SetContent(c.historyBuf.String())
 		c.history.GotoBottom()
-		// log.Println("Chat.Update: Appended assistant message, set sending=false")
+		log.Println("Chat.Update: Appended assistant message, set sending=false")
 
 	case tea.WindowSizeMsg:
-		// log.Printf("Chat.Update: WindowSizeMsg received: %dx%d", m.Width, m.Height)
 		inputHeight := lipgloss.Height(
 			c.borderStyle.Render(c.input.View()),
 		)
@@ -164,13 +154,3 @@ func (c *Chat) View() string {
 	inputView := c.borderStyle.Render(c.input.View())
 	return lipgloss.JoinVertical(lipgloss.Left, c.history.View(), inputView)
 }
-
-// // requestLLMCmd mocks an asynchronous LLM call; replace with real API.
-// func requestLLMCmd(prompt string) tea.Cmd {
-// 	return func() tea.Msg {
-// 		// Simulate latency
-// 		time.Sleep(600 * time.Millisecond)
-// 		// Echo back the prompt for now
-// 		return LLMReplyMsg{Content: "Echo: " + prompt}
-// 	}
-// }
