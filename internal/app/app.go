@@ -14,8 +14,6 @@ import (
 	// "github.com/charmbracelet/bubbles/filepicker" Keep for later
 )
 
-type ErrorMsg struct{ Err error } // For LLM errors
-
 // define different views/states the application can be in
 type viewState int
 
@@ -34,7 +32,8 @@ type App struct {
 	chat        *ui.Chat
 	modelPicker *modelpicker.Model
 	// filePicker filepicker.Model // Keep for later
-	llmClient llm.LLMClient
+	llmClient           llm.LLMClient
+	conversationHistory []llm.Message
 	//add other view models later
 
 	// State
@@ -69,11 +68,14 @@ func New() *App {
 	//fp.CurrentDirectory = "."
 
 	// --- LLM Client Setup ---
-	llmSvc, err := llm.NewDummyClient() // Start with dummy
+	llmSvc, err := llm.NewOpenRouterClient()
 	if err != nil {
-		fmt.Println("Error initializing LLM Client:", err)
-		// Exit or handle gracefully
-		os.Exit(1)
+		// fall back to dummy client if openrouter client creation fails
+		log.Printf("Error initializing openrouter client: %v. Falling back to dummy client", err)
+		if err != nil {
+			fmt.Println("Error initializing LLM Client:", err)
+			os.Exit(1)
+		}
 	}
 
 	defaultModel := availableModels[0]
@@ -83,9 +85,9 @@ func New() *App {
 		chat:        chatModel,
 		modelPicker: mp,
 		// filePicker:    fp, // Keep for later
-		llmClient: llmSvc,
-
-		selectedModel: defaultModel,
+		llmClient:           llmSvc,
+		conversationHistory: []llm.Message{},
+		selectedModel:       defaultModel,
 
 		quitKey: key.NewBinding(
 			key.WithKeys("ctrl+c"),
@@ -119,7 +121,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	log.Printf("App.Update received msg type: %T", msg)
 	switch m := msg.(type) {
 	case tea.WindowSizeMsg:
-		// log.Printf("WindowSizeMsg received: %dx%d", m.Width, m.Height)
 		a.width = m.Width
 		a.height = m.Height
 		// propogate resize message to all views
@@ -208,12 +209,27 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		prompt := m.Prompt
 		model := a.selectedModel
 		log.Printf("Prompt: %s\nModel: %s", prompt, model)
+
+		a.conversationHistory = append(a.conversationHistory, llm.Message{
+			Role:    "user",
+			Content: prompt,
+		})
+
+		log.Printf("Prompt: %s\nModel: %s\nHistory length: %d", prompt, model, len(a.conversationHistory))
+
 		// contextText := a.contextContentd
 		cmd := func() tea.Msg {
-			response, err := a.llmClient.Generate(context.Background(), model, prompt)
+			response, err := a.llmClient.Generate(context.Background(), model, prompt, a.conversationHistory)
 			if err != nil {
 				return llm.ErrorMsg{Err: err}
 			}
+
+			// add the assistant's response to history
+			a.conversationHistory = append(a.conversationHistory, llm.Message{
+				Role:    "assistant",
+				Content: response,
+			})
+
 			return ui.LLMReplyMsg{Content: response}
 		}
 		cmds = append(cmds, cmd)
@@ -229,9 +245,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			log.Printf("LLMReplyMsg received but not in chatView, ignoring.")
 		}
 
-	case ErrorMsg: // Message from the LLM command function (failure)
+	case llm.ErrorMsg: // Message from the LLM command function (failure)
 		a.lastError = m.Err
 		// TODO: Display this error nicely, maybe append to chat history
+		log.Printf("LLMError received: %s", a.lastError)
 		errMsg := fmt.Sprintf("Assistant Error: %s", m.Err.Error())
 		errorReply := ui.LLMReplyMsg{Content: errMsg} // Send as a reply
 		chatModel, chatCmd := a.chat.Update(errorReply)
