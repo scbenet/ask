@@ -63,7 +63,7 @@ func New(width, height int) *Chat {
 
 	// viewport (scrollable chat history)
 	vp := viewport.New(width, 0)
-	vp.KeyMap = viewport.DefaultKeyMap()
+	vp.KeyMap = CustomKeyMap()
 	vp.SetContent("")
 
 	c := &Chat{
