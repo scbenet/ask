@@ -36,6 +36,7 @@ type App struct {
 	// State
 	selectedModel       string
 	conversationHistory []llm.Message
+	streamChan          chan tea.Msg
 
 	// keybindings
 	quitKey        key.Binding
@@ -50,7 +51,7 @@ func New() *App {
 	// TODO move this to a config file or something
 	availableModels := []string{
 		"google/gemini-2.5-flash-preview",
-		"google/gemini-2.5-pro-preview/03-25",
+		"google/gemini-2.5-pro-preview",
 		"openai/o4-mini-high",
 		"openai/o3",
 		"openai/gpt-4.1",
@@ -70,9 +71,7 @@ func New() *App {
 	llmSvc, err := llm.NewOpenRouterClient()
 	if err != nil {
 		log.Printf("Error initializing openrouter client: %v", err)
-		if err != nil {
-			os.Exit(1)
-		}
+		os.Exit(1)
 	}
 
 	defaultModel := availableModels[0]
@@ -107,17 +106,28 @@ func (a *App) Init() tea.Cmd {
 	// return tea.Batch(a.chat.Init(), a.filePicker.Init())
 }
 
+// helper function to create a command that listens to our stream channel
+func listenToStream(ch chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			// channel has been closed by the sender
+			// this implies the stream has ended (either with StreamEndMsg or StreamErrorMsg)
+			return nil
+		}
+		return msg
+	}
+}
+
 // Update function handles messages for the entire application
 // delegates messages to the active view or handles global actions
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
-	// log.Printf("App.Update received msg type: %T", msg)
 	switch m := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width = m.Width
 		a.height = m.Height
-		// propogate resize message to all views
 		// chat view handles its own resize logic internally
 		chatModel, chatCmd := a.chat.Update(msg)
 		a.chat = chatModel.(*ui.Chat) // type assertion needed TODO: figure out what this does lol
@@ -134,41 +144,31 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// -- handle key messages --
 	case tea.KeyMsg:
-		// global keybindings
-		// log.Printf("KeyMsg received: %s (ActiveView: %v)", m.String(), a.activeView)
-		// --- message delegation ---
-		// if KeyMsg isn't a blobal keybinding, delegate it to the active view
 		switch a.activeView {
 		case chatView:
-
 			if key.Matches(m, a.quitKey) {
 				log.Printf("Key '%s' received in chatView", m.String())
 				return a, tea.Quit
 			}
 
-			// *** Explicitly check model picker key ***
-			isModelPickerKey := key.Matches(m, a.modelPickerKey)
-
-			if isModelPickerKey {
+			if key.Matches(m, a.modelPickerKey) {
+				// ensure no active stream before switching views
+				// could cancel the stream here instead (probably better to listen to the user)
+				// but not all providers support stream cancellation (looking at you, google!)
+				if a.streamChan != nil {
+					log.Println("model picker key pressed during active stream, ignoring for now")
+					return a, nil
+				}
 				a.activeView = modelPickerView
 				a.modelPicker.SetTitle(fmt.Sprintf("Select a model (current: %s)", a.selectedModel))
 				return a, nil
 			}
-
-			// if key.Matches(m, a.filePickerKey) { ... }
-
-			// If not a global key handled above, delegate to chat view
-			// log.Printf("Key '%s' not handled globally in chatView, delegating to chat.Update", m.String())
 			chatModel, chatCmd := a.chat.Update(msg)
 			a.chat = chatModel.(*ui.Chat) // type assertion
 			cmds = append(cmds, chatCmd)
 
 		case modelPickerView:
 			// TODO make ctrl-c from modelPicker to go back to chat
-			// if key.Matches(m, a.quitKey) {
-			// 	log.Printf("Quit key matched in modelPickerView")
-			// 	return a, tea.Quit
-			// }
 
 			pickerModel, pickerCmd := a.modelPicker.Update(msg)
 			a.modelPicker = pickerModel.(*modelpicker.Model)
@@ -187,6 +187,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.activeView = chatView
 
 	case ui.SendPromptMsg:
+		// prevent multiple concurrent streams
+		if a.streamChan != nil {
+			log.Println("SendPromptMsg received while a stream is already active, ignoring...")
+			return a, nil
+		}
 		a.chat.SetSending(true)
 		log.Printf("SetSending: true")
 		prompt := m.Prompt
@@ -197,25 +202,59 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Role:    "user",
 			Content: prompt,
 		})
+		historyCopy := make([]llm.Message, len(a.conversationHistory))
+		copy(historyCopy, a.conversationHistory)
+		log.Printf("History length for stream: %d", len(historyCopy))
 
-		log.Printf("Prompt: %s\nModel: %s\nHistory length: %d", prompt, model, len(a.conversationHistory))
+		a.streamChan = make(chan tea.Msg) // create new channel for this stream
+		go a.llmClient.StreamGenerate(context.Background(), model, historyCopy, a.streamChan)
+		cmds = append(cmds, listenToStream(a.streamChan)) // start listening
 
-		cmd := func() tea.Msg {
-			response, err := a.llmClient.Generate(context.Background(), model, prompt, a.conversationHistory)
-			if err != nil {
-				return llm.ErrorMsg{Err: err}
-			}
-
-			// add the assistant's response to history
-			a.conversationHistory = append(a.conversationHistory, llm.Message{
-				Role:    "assistant",
-				Content: response,
-			})
-
-			return ui.LLMReplyMsg{Content: response}
+	case llm.StreamChunkMsg:
+		log.Printf("StreamChunkMsg received in app")
+		if a.activeView == chatView {
+			// pass chunk to chat for rendering
+			chatModel, chatCmd := a.chat.Update(m)
+			a.chat = chatModel.(*ui.Chat)
+			cmds = append(cmds, chatCmd)
 		}
-		cmds = append(cmds, cmd)
+		// continue listening for more chunks
+		if a.streamChan != nil {
+			cmds = append(cmds, listenToStream(a.streamChan))
+		}
 
+	case llm.StreamEndMsg:
+		log.Printf("StreamEndMsg received in app, full response length: %d", len(m.FullResponse))
+		// add complete response to conversation history
+		a.conversationHistory = append(a.conversationHistory, llm.Message{
+			Role:    "assistant",
+			Content: m.FullResponse,
+		})
+		if a.activeView == chatView {
+			responseDoneMsg := ui.StreamEndMsg{FullResponse: m.FullResponse}
+			chatModel, chatCmd := a.chat.Update(responseDoneMsg)
+			a.chat = chatModel.(*ui.Chat)
+			cmds = append(cmds, chatCmd)
+			a.chat.SetSending(false)
+		}
+		// done streaming, won't need this anymore
+		a.streamChan = nil
+
+	case llm.StreamErrorMsg:
+		a.lastError = m.Err
+		log.Printf("StreamErrorMsg received in app: %v", m.Err)
+		errMsg := fmt.Sprintf("assistant stream error: %s", m.Err.Error())
+		// display error in chat view
+		errorReply := ui.StreamErrorMsg{Err: errMsg}
+		if a.activeView == chatView {
+			chatModel, chatCmd := a.chat.Update(errorReply) // Send error to chat
+			a.chat = chatModel.(*ui.Chat)
+			cmds = append(cmds, chatCmd)
+			a.chat.SetSending(false) // Signal sending is done (due to error)
+		}
+		a.streamChan = nil
+
+	// non-streaming response message
 	case ui.LLMReplyMsg:
 		log.Printf("LLMReplyMsg received")
 		if a.activeView == chatView {
@@ -227,7 +266,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			log.Printf("LLMReplyMsg received but not in chatView, ignoring.")
 		}
 
-	case llm.ErrorMsg: // Message from the LLM command function (failure)
+	// non-streaming response error message
+	case llm.GenerationErrorMsg:
 		a.lastError = m.Err
 		// TODO: Display this error nicely, maybe append to chat history
 		log.Printf("LLMError received: %s", a.lastError)
@@ -239,10 +279,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.chat.SetSending(false)
 
 	default:
-		// if the message type isn't handled globally or specifically routed,
-		// route it to the active view just in case
-		// TODO will need to make sure child models handle unexpected types gracefully
-		log.Printf("Default message case reached for type %T, delegating based on active view (%v)", msg, a.activeView)
 		switch a.activeView {
 		case chatView:
 			chatModel, chatCmd := a.chat.Update(msg)
@@ -259,7 +295,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the view for the currently active model.
 func (a *App) View() string {
-	// Delegate rendering to the active view's View method
 	switch a.activeView {
 	case chatView:
 		return a.chat.View()
