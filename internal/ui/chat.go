@@ -82,7 +82,7 @@ var keys = keyMap{
 	),
 	SendPrompt: key.NewBinding(
 		key.WithKeys("enter"),
-		key.WithHelp("enter", "send your message"),
+		key.WithHelp("enter", "send message"),
 	),
 	NewLine: key.NewBinding(
 		key.WithKeys("shift+enter", "ctrl+j"),
@@ -90,15 +90,15 @@ var keys = keyMap{
 	),
 	ModelPicker: key.NewBinding(
 		key.WithKeys("ctrl-k"),
-		key.WithHelp("ctrl-k", "open model picker"),
+		key.WithHelp("ctrl-k", "model picker"),
 	),
 	Help: key.NewBinding(
 		key.WithKeys("ctrl-q"),
-		key.WithHelp("ctrl-q", "toggle help"),
+		key.WithHelp("ctrl-q", "more help"),
 	),
 	Quit: key.NewBinding(
 		key.WithKeys("ctrl+c"),
-		key.WithHelp("ctrl-c", "quit"),
+		key.WithHelp("ctrl-c", "clear input/quit"),
 	),
 }
 
@@ -124,6 +124,10 @@ type Chat struct {
 
 	glamourRenderer      *glamour.TermRenderer
 	lastGlamourWrapWidth int
+}
+
+func (c *Chat) GetInputValue() string {
+	return c.input.Value()
 }
 
 func (c *Chat) SetSending(sending bool) {
@@ -161,6 +165,7 @@ func New(width, height int) *Chat {
 	vp.SetContent("")
 
 	helpModel := help.New()
+
 	chatHistoryViewStyle := lipgloss.NewStyle().Padding(0, 1)
 
 	// calculate initial wrap width
@@ -192,7 +197,6 @@ func New(width, height int) *Chat {
 		lastGlamourWrapWidth: initialContentWidth,
 	}
 	// set initial history width based on input width, will be refined by WindowSizeMsg
-	// this is a fallback in case WindowSizeMsg is not received immediately or if needed before it.
 	c.history.Width = initialContentWidth
 
 	return c
@@ -214,6 +218,14 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m := msg.(type) {
 	case tea.KeyMsg:
 		switch {
+		case key.Matches(m, c.keys.Quit):
+			if c.input.Value() != "" {
+				log.Println("Chat.Update: ctrl-c matched, input not empty. clearing input")
+				c.input.Reset()
+				return c, c.input.Focus()
+			}
+			log.Println("Chat.Update: ctrl-c matched, input empty, letting app handle quit")
+
 		case key.Matches(m, c.sendKey) && !c.sending: // send prompt
 			log.Println("Chat.Update: Send key matched")
 			prompt := strings.TrimSpace(c.input.Value())
@@ -238,6 +250,7 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(m, c.keys.Help):
 			log.Println("Chat.Update: help key triggered")
 			c.help.ShowAll = !c.help.ShowAll
+			return c, nil // No command, just state change
 
 		default:
 			// pass messages to nested models

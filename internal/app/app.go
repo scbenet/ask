@@ -86,7 +86,6 @@ func New() *App {
 		llmClient:           llmSvc,
 		conversationHistory: []llm.Message{},
 		selectedModel:       defaultModel,
-
 		quitKey: key.NewBinding(
 			key.WithKeys("ctrl+c"),
 			key.WithHelp("ctrl+c", "quit"),
@@ -102,7 +101,6 @@ func New() *App {
 	}
 }
 
-// Init function initializes the application
 func (a *App) Init() tea.Cmd {
 	return a.chat.Init()
 	// return tea.Batch(a.chat.Init(), a.filePicker.Init())
@@ -132,7 +130,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.height = m.Height
 		// chat view handles its own resize logic internally
 		chatModel, chatCmd := a.chat.Update(msg)
-		a.chat = chatModel.(*ui.Chat) // type assertion needed TODO: figure out what this does lol
+		a.chat = chatModel.(*ui.Chat)
 		cmds = append(cmds, chatCmd)
 		// also send resize to model picker (it expects full window size)
 		pickerModel, pickerCmd := a.modelPicker.Update(msg)
@@ -148,29 +146,38 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch a.activeView {
 		case chatView:
-			if key.Matches(m, a.quitKey) {
-				log.Printf("Key '%s' received in chatView", m.String())
-				return a, tea.Quit
-			}
+			chatInputContainedText := a.chat.GetInputValue() != ""
+			chatModel, chatCmd := a.chat.Update(m)
+			a.chat = chatModel.(*ui.Chat)
+			cmds = append(cmds, chatCmd)
+			isQuit := key.Matches(m, a.quitKey)
+			chatIsNowEmpty := a.chat.GetInputValue() == ""
 
-			if key.Matches(m, a.modelPickerKey) {
+			if isQuit && chatInputContainedText && chatIsNowEmpty {
+				log.Println("App.Update: ctrl-c handled by chat to clear input, not quitting")
+			} else if key.Matches(m, a.modelPickerKey) {
 				// ensure no active stream before switching views
 				// could cancel the stream here instead (probably better to listen to the user)
 				// but not all providers support stream cancellation (looking at you, google!)
 				if a.streamChan != nil {
 					log.Println("model picker key pressed during active stream, ignoring for now")
+				} else {
+					a.activeView = modelPickerView
+					a.modelPicker.SetTitle(fmt.Sprintf("Select a model (current: %s)", a.selectedModel))
 					return a, nil
 				}
-				a.activeView = modelPickerView
-				a.modelPicker.SetTitle(fmt.Sprintf("Select a model (current: %s)", a.selectedModel))
-				return a, nil
+
+			} else if isQuit {
+				log.Printf("App.Update: quitting... ")
+				return a, tea.Quit
 			}
-			chatModel, chatCmd := a.chat.Update(msg)
-			a.chat = chatModel.(*ui.Chat) // type assertion
-			cmds = append(cmds, chatCmd)
 
 		case modelPickerView:
-			// TODO make ctrl-c from modelPicker to go back to chat
+			if key.Matches(m, a.quitKey) { // if ctrl-c in model picker
+				log.Println("App.Update: Ctrl+C in modelPickerView, returning to chat view.")
+				a.activeView = chatView
+				return a, nil
+			}
 
 			pickerModel, pickerCmd := a.modelPicker.Update(msg)
 			a.modelPicker = pickerModel.(*modelpicker.Model)

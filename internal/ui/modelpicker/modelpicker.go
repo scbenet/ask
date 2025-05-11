@@ -99,25 +99,33 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 
 		m.list.SetWidth(msg.Width)
-		m.list.SetHeight(msg.Height - 4)
+		m.list.SetHeight(msg.Height)
 		return m, nil
 
 	case tea.KeyMsg:
 
 		switch msg.String() {
+		case "q", "esc":
+			if m.list.FilterState() == 0 {
+				return m, func() tea.Msg {
+					return PickerCancelledMsg{}
+				}
+			}
 
 		case "enter":
-			selected, ok := m.list.SelectedItem().(Item)
-			if ok {
-				m.selectedItem = string(selected)
-				return m, func() tea.Msg {
-					return ModelSelectedMsg{Model: m.selectedItem}
+			if m.list.FilterState() != 1 {
+				selected, ok := m.list.SelectedItem().(Item)
+				if ok {
+					m.selectedItem = string(selected)
+					return m, func() tea.Msg {
+						return ModelSelectedMsg{Model: m.selectedItem}
+					}
 				}
 			}
 		}
 	}
 
-	// delegate non handled messages (inlcuding navigation)
+	// delegate non-handled messages (inlcuding navigation)
 	// to the underlying list model
 	m.list, cmd = m.list.Update(msg)
 	return m, cmd
