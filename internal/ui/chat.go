@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/scbenet/ask/internal/llm"
 )
@@ -120,6 +121,9 @@ type Chat struct {
 	errorStyle       lipgloss.Style
 	borderStyle      lipgloss.Style
 	historyViewStyle lipgloss.Style
+
+	glamourRenderer      *glamour.TermRenderer
+	lastGlamourWrapWidth int
 }
 
 func (c *Chat) SetSending(sending bool) {
@@ -157,23 +161,39 @@ func New(width, height int) *Chat {
 	vp.SetContent("")
 
 	helpModel := help.New()
+	chatHistoryViewStyle := lipgloss.NewStyle().Padding(0, 1)
+
+	// calculate initial wrap width
+	hPadding := chatHistoryViewStyle.GetPaddingLeft() + chatHistoryViewStyle.GetPaddingRight()
+	initialContentWidth := max(width-hPadding, 80)
+
+	renderer, err := glamour.NewTermRenderer(
+		glamour.WithStandardStyle("dark"),
+		glamour.WithWordWrap(initialContentWidth),
+	)
+
+	if err != nil {
+		log.Printf("error initializing glamour renderer: %v. markdown rendering will fallback to plain text", err)
+		renderer = nil
+	}
 
 	c := &Chat{
-		history:          vp,
-		input:            ti,
-		keys:             keys,
-		help:             helpModel,
-		sendKey:          key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
-		userStyle:        lipgloss.NewStyle().Italic(true).Foreground(lipgloss.Color("#707070")),
-		assistantStyle:   lipgloss.NewStyle(),
-		errorStyle:       lipgloss.NewStyle().Foreground(lipgloss.Color("9")), // red for errors
-		borderStyle:      lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#777")),
-		historyViewStyle: lipgloss.NewStyle().Padding(0, 1),
+		history:              vp,
+		input:                ti,
+		keys:                 keys,
+		help:                 helpModel,
+		sendKey:              key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
+		userStyle:            lipgloss.NewStyle().Italic(true).Foreground(lipgloss.Color("#707070")),
+		assistantStyle:       lipgloss.NewStyle(),
+		errorStyle:           lipgloss.NewStyle().Foreground(lipgloss.Color("9")), // red for errors
+		borderStyle:          lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#777")),
+		historyViewStyle:     lipgloss.NewStyle().Padding(0, 1),
+		glamourRenderer:      renderer,
+		lastGlamourWrapWidth: initialContentWidth,
 	}
 	// set initial history width based on input width, will be refined by WindowSizeMsg
 	// this is a fallback in case WindowSizeMsg is not received immediately or if needed before it.
-	hPadding := c.historyViewStyle.GetPaddingLeft() + c.historyViewStyle.GetPaddingRight()
-	c.history.Width = width - hPadding
+	c.history.Width = initialContentWidth
 
 	return c
 }
@@ -189,10 +209,7 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	// ensure history width is positive for wrapping, default to a minimum if not.
-	wrapWidth := c.history.Width
-	if wrapWidth <= 0 {
-		wrapWidth = 80 // A sensible default
-	}
+	lipglossWrapWidth := max(c.history.Width, 80)
 
 	switch m := msg.(type) {
 	case tea.KeyMsg:
@@ -208,7 +225,7 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// append user message to history
 			rawUserMessage := fmt.Sprintf("> %s", prompt)
-			styledAndWrappedUserMessage := c.userStyle.Width(wrapWidth).Render(rawUserMessage)
+			styledAndWrappedUserMessage := c.userStyle.Width(lipglossWrapWidth).Render(rawUserMessage)
 			fmt.Fprintf(&c.historyBuf, "%s\n\n", styledAndWrappedUserMessage)
 
 			c.history.SetContent(c.historyBuf.String())
@@ -236,7 +253,7 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.assistantResponse.WriteString(m.Content) // add to temporary buffer for current response
 
 		rawCurrentResponse := c.assistantResponse.String()
-		styledAndWrappedResponse := c.assistantStyle.Width(wrapWidth).Render(rawCurrentResponse)
+		styledAndWrappedResponse := c.assistantStyle.Width(lipglossWrapWidth).Render(rawCurrentResponse)
 
 		// combine finalized history with currently streaming message
 		c.history.SetContent(c.historyBuf.String() + styledAndWrappedResponse)
@@ -244,15 +261,31 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case StreamEndMsg:
 		log.Printf("Chat.Update: StreamEndMsg received. Full response was: %s", m.FullResponse)
-		styledAndWrappedFinalResponse := c.assistantStyle.Width(wrapWidth).Render(m.FullResponse)
-		fmt.Fprintf(&c.historyBuf, "%s\n\n", styledAndWrappedFinalResponse)
+
+		var finalRendereredResponse string
+		if c.glamourRenderer != nil {
+			renderedMarkdown, err := c.glamourRenderer.Render(m.FullResponse)
+			if err != nil {
+				log.Printf("error rendering markdown with glamour: %v", err)
+				finalRendereredResponse = c.assistantStyle.Width(lipglossWrapWidth).Render(m.FullResponse)
+			} else {
+				finalRendereredResponse = strings.TrimSuffix(renderedMarkdown, "\n")
+			}
+		} else {
+			log.Println("glamour renderer not initalized, falling back to plain text")
+			finalRendereredResponse = c.assistantStyle.Width(lipglossWrapWidth).Render(m.FullResponse)
+		}
+
+		// append the final rendered and formatted response to historyBuf
+		fmt.Fprintf(&c.historyBuf, "%s\n\n", finalRendereredResponse)
+
 		c.assistantResponse.Reset()
 		c.history.SetContent(c.historyBuf.String())
 		c.history.GotoBottom()
 
 	case StreamErrorMsg:
 		log.Printf("Chat.Update: StreamErrorMsg received: %s", m.Err)
-		styledAndWrappedError := c.errorStyle.Width(wrapWidth).Render(m.Err)
+		styledAndWrappedError := c.errorStyle.Width(lipglossWrapWidth).Render(m.Err)
 		fmt.Fprintf(&c.historyBuf, "%s\n\n", styledAndWrappedError)
 
 		c.assistantResponse.Reset() // Clear any partial streaming response
@@ -262,12 +295,25 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// primarily for non-streaming or error messages
 	case LLMReplyMsg:
 		log.Printf("Chat.Update: LLMReplyMsg received: '%s'", m.Content)
-		styledAndWrappedResponse := c.assistantStyle.Width(wrapWidth).Render(m.Content)
-		fmt.Fprintf(&c.historyBuf, "%s\n\n", styledAndWrappedResponse)
+		var renderedResponse string
+		if c.glamourRenderer != nil {
+			renderedMarkdown, err := c.glamourRenderer.Render(m.Content)
+			if err != nil {
+				log.Printf("error rendering Markdown with glamour: %v.", err)
+				renderedResponse = c.assistantStyle.Width(lipglossWrapWidth).Render(m.Content)
+			} else {
+				renderedResponse = strings.TrimSuffix(renderedMarkdown, "\n")
+			}
+		} else {
+			log.Println("glamour renderer not initialized, falling back to plaintext")
+			renderedResponse = c.assistantStyle.Width(lipglossWrapWidth).Render(m.Content)
+		}
+
+		fmt.Fprintf(&c.historyBuf, "%s\n\n", renderedResponse)
 
 		c.history.SetContent(c.historyBuf.String())
 		c.history.GotoBottom()
-		c.assistantResponse.Reset()
+		c.assistantResponse.Reset() // Good practice, though not strictly for streaming here
 		log.Println("Chat.Update: Appended LLMReplyMsg")
 
 	case tea.WindowSizeMsg:
@@ -278,12 +324,39 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		hPadding := c.historyViewStyle.GetPaddingLeft() + c.historyViewStyle.GetPaddingRight()
 		vPadding := c.historyViewStyle.GetPaddingTop() + c.historyViewStyle.GetPaddingBottom()
 
-		newHistoryWidth := max(m.Width-hPadding, 1)
-		c.history.Width = newHistoryWidth
+		newContentWidth := max(m.Width-hPadding, 1)
+		c.history.Width = newContentWidth
 		c.history.Height = m.Height - inputHeight - vPadding - helpHeight
 
 		c.input.SetWidth(m.Width - 2) // -2 for border
 		c.help.Width = m.Width - hPadding
+
+		// update glamour renderer if width changed
+		if newContentWidth != c.lastGlamourWrapWidth {
+			log.Printf("window resized, attempting to update glamour renderer with width %d", newContentWidth)
+			updatedRenderer, err := glamour.NewTermRenderer(
+				glamour.WithStandardStyle("dark"),
+				glamour.WithWordWrap(newContentWidth),
+			)
+			if err != nil {
+				log.Printf("error updating glamour renderer on resize: %v. old renderer (if any) will be kept", err)
+			} else {
+				c.glamourRenderer = updatedRenderer
+				c.lastGlamourWrapWidth = newContentWidth
+			}
+		} else if c.glamourRenderer == nil { // try to initalize renderer if it failed initially
+			log.Printf("attempting to initialize glamour renderer on resize with width: %d", newContentWidth)
+			renderer, err := glamour.NewTermRenderer(
+				glamour.WithStandardStyle("dark"),
+				glamour.WithWordWrap(newContentWidth),
+			)
+			if err != nil {
+				log.Printf("error initialized glamour renderer on resize: %v", err)
+			} else {
+				c.glamourRenderer = renderer
+				c.lastGlamourWrapWidth = newContentWidth
+			}
+		}
 
 		// after a resize, re-set content to allow existing history to re-wrap if needed
 		// history contains pre-warpped strings, so old messages will not re-wrap, but
