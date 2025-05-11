@@ -7,6 +7,16 @@ import (
 
 // Define a custom keymap so the viewport isn't jumping around while users
 // are typing
+//
+
+type customKeyMap struct {
+	PageDown     key.Binding
+	PageUp       key.Binding
+	HalfPageUp   key.Binding
+	HalfPageDown key.Binding
+	Up           key.Binding
+	Down         key.Binding
+}
 
 func CustomKeyMap() viewport.KeyMap {
 	return viewport.KeyMap{
@@ -33,14 +43,6 @@ func CustomKeyMap() viewport.KeyMap {
 		Down: key.NewBinding(
 			key.WithKeys("down", "ctrl+p"),
 			key.WithHelp("↓/ctrl+p", "down"),
-		),
-		Left: key.NewBinding(
-			key.WithKeys("left", "ctrl+h"),
-			key.WithHelp("←/ctrl+h", "move left"),
-		),
-		Right: key.NewBinding(
-			key.WithKeys("right", "ctrl+l"),
-			key.WithHelp("→/ctrl+l", "move right"),
 		),
 	}
 }

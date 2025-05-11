@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 
+	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/scbenet/ask/internal/llm"
@@ -32,6 +33,7 @@ type App struct {
 	modelPicker *modelpicker.Model
 	// filePicker filepicker.Model
 	llmClient llm.LLMClient
+	helpF     *help.Model
 
 	// State
 	selectedModel       string
